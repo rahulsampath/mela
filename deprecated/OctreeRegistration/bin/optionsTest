@@ -1,0 +1,35 @@
+ 
+ -mu 1.0
+ -lambda 4.0
+ -alpha 1.0
+ -Ne 64
+ -maxDepth 30
+ -mgLoadFac 2.0
+ -threshold 1.0
+
+ -nlevels 3
+
+ %-useRegularOctreeAtLevel 6
+ -useRandomU
+ %-saveRandU
+ %-loadRandU
+ %-scatterRandU
+
+ %-compressLut
+
+ -buildFullCoarseMat 0
+ -buildFullMatAll 0
+
+ -eig_ksp_type cg
+ -eig_pc_type none
+ -eig_ksp_converged_reason
+ -eig_ksp_monitor
+ -eig_ksp_view
+ -eig_ksp_max_it 10
+ -eig_ksp_rtol 1e-5 
+
+ %-eig_ksp_compute_eigenvalues_explicitly
+ %-eig_ksp_compute_eigenvalues
+ 
+
+

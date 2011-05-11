@@ -1,0 +1,81 @@
+
+INCLUDE = -I./include ${DENDRO_INCLUDE} ${PETSC_INCLUDE} 
+
+LIBS = -L./lib ${DENDRO_LIB} ${PETSC_LIB} 
+
+EXEC = bin/finalRunOpt bin/analRunOpt bin/testInject bin/genImg \
+       bin/solveElas bin/testReadImg \
+       bin/testWriteImg bin/writeZeroImg bin/testEig bin/genAnalyticDisp bin/mergeDisp \
+       bin/tmpTest bin/testMatVec bin/genVtk bin/writeZeroDisp \
+       bin/saveState bin/loadState bin/isoRunOpt bin/writeIsoFacImg
+
+all : $(EXEC)
+
+%.o: %.$(CEXT)
+	$(PCC) -c $(CFLAGS) $(INCLUDE) $< -o $@
+
+./src/%.o: ./src/%.$(CEXT)
+	$(PCC) -c $(CFLAGS) $(INCLUDE) $< -o $@
+
+bin/loadState : ./src/loadState.o ./src/registration.o ./src/regInterpCubic.o 
+	$(PCC) $(CFLAGS) $^ -o $@ $(LIBS) 
+
+bin/saveState : ./src/saveState.o ./src/registration.o ./src/regInterpCubic.o 
+	$(PCC) $(CFLAGS) $^ -o $@ $(LIBS) 
+
+bin/isoRunOpt : ./src/isoRunOpt.o ./src/registration.o ./src/regInterpCubic.o 
+	$(PCC) $(CFLAGS) $^ -o $@ $(LIBS) 
+
+bin/analRunOpt : ./src/analRunOpt.o ./src/registration.o ./src/regInterpCubic.o 
+	$(PCC) $(CFLAGS) $^ -o $@ $(LIBS) 
+
+bin/writeZeroDisp : ./src/writeZeroDisp.o ./src/registration.o ./src/regInterpCubic.o 
+	$(PCC) $(CFLAGS) $^ -o $@ $(LIBS) 
+
+bin/mergeDisp : ./src/mergeDisp.o ./src/registration.o ./src/regInterpCubic.o 
+	$(PCC) $(CFLAGS) $^ -o $@ $(LIBS) 
+
+bin/testInject : ./src/testInject.o ./src/registration.o ./src/regInterpCubic.o 
+	$(PCC) $(CFLAGS) $^ -o $@ $(LIBS) 
+
+bin/genVtk : ./src/genVtk.o ./src/registration.o ./src/regInterpCubic.o 
+	$(PCC) $(CFLAGS) $^ -o $@ $(LIBS) 
+
+bin/genImg : ./src/genImg.o ./src/registration.o ./src/regInterpCubic.o 
+	$(PCC) $(CFLAGS) $^ -o $@ $(LIBS) 
+
+bin/genAnalyticDisp : ./src/genAnalyticDisp.o ./src/registration.o ./src/regInterpCubic.o 
+	$(PCC) $(CFLAGS) $^ -o $@ $(LIBS) 
+
+bin/tmpTest : ./src/tmpTest.o ./src/registration.o ./src/regInterpCubic.o 
+	$(PCC) $(CFLAGS) $^ -o $@ $(LIBS) 
+
+bin/finalRunOpt : ./src/finalRunOpt.o ./src/registration.o ./src/regInterpCubic.o 
+	$(PCC) $(CFLAGS) $^ -o $@ $(LIBS) 
+
+bin/testEig : ./src/testEig.o ./src/registration.o ./src/regInterpCubic.o 
+	$(PCC) $(CFLAGS) $^ -o $@ $(LIBS) 
+
+bin/testMatVec : ./src/testMatVec.o ./src/registration.o ./src/regInterpCubic.o 
+	$(PCC) $(CFLAGS) $^ -o $@ $(LIBS) 
+
+bin/solveElas : ./src/solveElas.o ./src/registration.o ./src/regInterpCubic.o 
+	$(PCC) $(CFLAGS) $^ -o $@ $(LIBS) 
+
+bin/testReadImg : ./src/testReadImg.o ./src/registration.o ./src/regInterpCubic.o 
+	$(PCC) $(CFLAGS) $^ -o $@ $(LIBS) 
+
+bin/writeIsoFacImg : ./src/writeIsoFacImg.o ./src/registration.o ./src/regInterpCubic.o 
+	$(PCC) $(CFLAGS) $^ -o $@ $(LIBS) 
+
+bin/testWriteImg : ./src/testWriteImg.o ./src/registration.o ./src/regInterpCubic.o 
+	$(PCC) $(CFLAGS) $^ -o $@ $(LIBS) 
+
+bin/writeZeroImg : ./src/writeZeroImg.o ./src/registration.o ./src/regInterpCubic.o 
+	$(PCC) $(CFLAGS) $^ -o $@ $(LIBS) 
+
+clean :
+	rm -rf $(EXEC)
+	rm -rf src/*.o
+
+

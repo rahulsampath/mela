@@ -1,0 +1,86 @@
+
+INCLUDE = -I./include ${DENDRO_INCLUDE} ${PETSC_INCLUDE} 
+
+ARCHIVES = ./lib/libExeMela.a ./lib/libMela.a 
+
+
+
+LIBS = -L./lib -lMela -lExeMela ${DENDRO_LIB} ${PETSC_LIB} 
+
+
+
+
+EXEC = bin/runOpt bin/isoRunOpt bin/analRunOpt bin/vectorRunOpt \
+bin/genImg bin/iterRunOptSerial bin/iterRunOptPar bin/concatDisp \
+bin/iterVecRunOpt bin/createVecImg bin/createScalarImg
+
+all : $(ARCHIVES) $(EXEC)
+
+core : $(ARCHIVES) 
+
+%.o: %.$(CEXT)
+	$(PCC) -c $(CFLAGS) $(INCLUDE) $< -o $@
+
+./src/%.o: ./src/%.$(CEXT)
+	$(PCC) -c $(CFLAGS) $(INCLUDE) $< -o $@
+
+./lib/libMela.a :  ./src/registration.o ./src/regInterpCubic.o 
+	${AR} ${AR_FLAGS} $@ $^
+	${RANLIB} $@
+
+./lib/libExeMela.a :  ./src/elasReg.o
+	${AR} ${AR_FLAGS} $@ $^
+	${RANLIB} $@
+
+
+bin/runOpt : ./src/runOpt.o $(ARCHIVES)  
+	$(PCC) $(CFLAGS) $^ -o $@ $(LIBS) 
+
+bin/runOptTemp : ./src/runOptTemp.o $(ARCHIVES)
+	$(PCC) $(CFLAGS) $^ -o $@ $(LIBS)
+
+bin/genImg : ./src/genImg.o $(ARCHIVES)
+	$(PCC) $(CFLAGS) $^ -o $@ $(LIBS)
+
+bin/iterRunOptSerial : ./src/iterRunOptSerial.o $(ARCHIVES)
+	$(PCC) $(CFLAGS) $^ -o $@ $(LIBS)
+
+bin/iterRunOptPar : ./src/iterRunOptPar.o $(ARCHIVES)
+	$(PCC) $(CFLAGS) $^ -o $@ $(LIBS)
+
+bin/concatDisp : ./src/concatDisp.o $(ARCHIVES)
+	$(PCC) $(CFLAGS) $^ -o $@ $(LIBS)
+
+bin/createVecImg : ./src/writeVecImg.o $(ARCHIVES)
+	$(PCC) $(CFLAGS) $^ -o $@ $(LIBS)
+
+bin/createScalarImg : ./src/writeScalarImg.o $(ARCHIVES)
+	$(PCC) $(CFLAGS) $^ -o $@ $(LIBS)
+
+
+
+bin/isoRunOpt : ./src/isoRunOpt.o $(ARCHIVES)
+	$(PCC) $(CFLAGS) $^ -o $@ $(LIBS) 
+
+bin/analRunOpt : ./src/analRunOpt.o $(ARCHIVES)
+	$(PCC) $(CFLAGS) $^ -o $@ $(LIBS) 
+
+bin/vectorRunOpt : ./src/vectorRunOpt.o $(ARCHIVES)
+	$(PCC) $(CFLAGS) $^ -o $@ $(LIBS) 
+
+bin/iterVecRunOpt : ./src/iterVecRunOpt.o $(ARCHIVES)
+	$(PCC) $(CFLAGS) $^ -o $@ $(LIBS) 
+
+bin/iterVecTest : ./src/iterVecTest.o $(ARCHIVES)
+	$(PCC) $(CFLAGS) $^ -o $@ $(LIBS) 
+
+
+clean :
+	rm -rf $(EXEC)
+	rm -rf ./src/*.o ./src/*~
+
+clobber : 
+	rm -rf  $(ARCHIVES) $(EXEC)
+	rm -rf ./src/*.o ./src/*~
+
+

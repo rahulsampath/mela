@@ -1,0 +1,5 @@
+
+MELA_LIB	    = -L${MELA_DIR}/lib -lExeMela -lMela 
+
+MELA_INCLUDE	    = -I${MELA_DIR}/include 
+

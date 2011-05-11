@@ -1,0 +1,73 @@
+OctreeRegistration
+=========================
+This software performs parallel non-parametric elastic image registration between a given pair of images using
+an octree-based finite element discretization, a Gauss-Newton optimizer and a multigrid
+preconditioned CG solver for the Newton step.
+ 
+
+Installation Instructions
+=========================
+
+This software uses the DENDRO and PETSC (version 2.3.3, compiled using a C++ compiler) libraries. So,
+PETSC and DENDRO must first be installed on the system.
+
+Make sure that the environment variables PETSC_DIR and PETSC_ARCH point to
+the correct PETSc installation. You can do this by typing the following command
+at the command line.
+
+echo $PETSC_DIR; echo $PETSC_ARCH
+
+The first line of the output should be set to the directory in which
+you installed PETSc and the second line must be the value of
+PETSC_ARCH that you set while compiling PETSc.
+
+Similarly, make sure that the environment variable DENDRO_DIR points to the 
+ directory in which DENDRO is installed. 
+ 
+Type 'make' to build the example programs. Go to the 'bin' directory and run the examples. 
+
+
+Running 'finalRunOpt'
+=========================
+This program performs elastic image registration between a pair of images.
+1) The '*.inp' files from the '${DENDRO_DIR}/Stencils' folder must be copied 
+   into the directory containing the executable.
+2) If you passed the options '__USE_MG_INIT_TYPE2__' or '__USE_MG_INIT_TYPE3__' to 'CFLAGS' while 
+compiling 'Dendro' or 'OctreeRegistration', then you must also copy and run the
+scripts '${DENDRO_DIR}/scripts/copyInpType2.sh' or '${DENDRO_DIR}/scripts/copyInpType3.sh', 
+respectively in the directory containing the executable. The previous step must
+be performed before this step.
+3) The 'bin/options' file must be present in the same directory as the executable.
+4) The executable 'finalRunOpt' accepts the following command line arguments in the
+same order:
+ fixedImg: Name of the file (without the .hdr or .img extension) containing the
+ fixed image.
+ movingImg: Name of the file (without the .hdr or .img extension) containing the
+ moving image.
+ DispFile: Prefix for the files (1 for each processor) to store the resulting displacement field.
+ The output files will be <DispFile>_<rank>_<npes>.dat where rank is the
+ MPI_Rank of the process and npes is the number of processors used.
+
+
+Running 'isoRunOpt'
+=========================
+This program performs elastic image registration between a pair of images, but
+the images are created inside the program itself. The fixed image is a set of
+half-toruses and the moving image is a set of spheres. This program was
+developed to test the isogranular scalability of the solver. 
+1) Follow Steps 1,2 and 3 from above.
+2) The executable 'isoRunOpt' accepts the following command line arguments in
+the same order:
+Nfe: Number of elements in each dimension of the finest image.
+Nce: Number of elements in each dimension of the coarsest image (for grid
+continuation).
+isoFac: The domain is divided into 2^(isoFac) equal parts in each dimension. The
+ fixed image has a half-torus centered within each of these subdomains and
+ the moving image has a sphere centered within each of these subdomains.
+
+
+
+
+
+
+
