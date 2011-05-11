@@ -1,0 +1,1114 @@
+
+#include "mpi.h"
+#include "sys.h"
+#include "omg.h"
+#include "registration.h"
+#include "regInterpCubic.h"
+#include "externVars.h"
+#include "dendro.h"
+
+#define __PI__ 3.14159265
+
+//Don't want time to be synchronized. Need to check load imbalance.
+#ifdef MPI_WTIME_IS_GLOBAL
+#undef MPI_WTIME_IS_GLOBAL
+#endif
+
+int elasMultEvent;
+int hessMultEvent;
+int hessFinestMultEvent;
+int createHessContextEvent;
+int updateHessContextEvent;
+int computeSigEvent;
+int computeTauEvent;
+int computeGradTauEvent;
+int computeNodalTauEvent;
+int computeNodalGradTauEvent;
+int evalObjEvent;
+int evalGradEvent;
+int createPatchesEvent;
+int expandPatchesEvent;
+int meshPatchesEvent;
+int copyValsToPatchesEvent;
+int optEvent;
+
+int tauElemAtUEvent;
+
+int main(int argc, char** argv) {
+  PetscInitialize(&argc, &argv, "options", 0);
+
+  ot::RegisterEvents();
+
+  PetscLogEventRegister(&tauElemAtUEvent, "tauElemAtU", PETSC_VIEWER_COOKIE);
+
+  PetscLogEventRegister(&optEvent, "Gauss-Newton", PETSC_VIEWER_COOKIE);
+  PetscLogEventRegister(&copyValsToPatchesEvent, "copyValsToPatches", PETSC_VIEWER_COOKIE);
+  PetscLogEventRegister(&meshPatchesEvent, "meshPatches", PETSC_VIEWER_COOKIE);
+  PetscLogEventRegister(&expandPatchesEvent, "expandPatches", PETSC_VIEWER_COOKIE);
+  PetscLogEventRegister(&createPatchesEvent, "createPatches", PETSC_VIEWER_COOKIE);
+  PetscLogEventRegister(&evalObjEvent, "Obj", PETSC_VIEWER_COOKIE);
+  PetscLogEventRegister(&evalGradEvent, "GradObj", PETSC_VIEWER_COOKIE);
+  PetscLogEventRegister(&computeSigEvent, "Sig", PETSC_VIEWER_COOKIE);
+  PetscLogEventRegister(&computeTauEvent, "Tau", PETSC_VIEWER_COOKIE);
+  PetscLogEventRegister(&computeGradTauEvent, "GradTau", PETSC_VIEWER_COOKIE);
+  PetscLogEventRegister(&computeNodalTauEvent, "NodalTau", PETSC_VIEWER_COOKIE);
+  PetscLogEventRegister(&computeNodalGradTauEvent, "NodalGradTau", PETSC_VIEWER_COOKIE);
+  PetscLogEventRegister(&elasMultEvent, "ElasMatMult", PETSC_VIEWER_COOKIE);
+  PetscLogEventRegister(&hessMultEvent, "HessMatMult", PETSC_VIEWER_COOKIE);
+  PetscLogEventRegister(&hessFinestMultEvent, "HessMatMultFinest", PETSC_VIEWER_COOKIE);
+  PetscLogEventRegister(&updateHessContextEvent, "UpdateHess", PETSC_VIEWER_COOKIE);
+  PetscLogEventRegister(&createHessContextEvent, "CreateHess", PETSC_VIEWER_COOKIE);
+
+  MPI_Comm commAll = MPI_COMM_WORLD;
+
+  int rank, npesAll;
+  MPI_Comm_rank(commAll, &rank);
+  MPI_Comm_size(commAll, &npesAll);
+
+  if(argc < 4) {
+    if(!rank) {
+      std::cout<<"Usage: exe fixedImg movingImg DispFile"<<std::endl;
+    }
+    PetscFinalize();
+    exit(0);
+  }
+
+  unsigned int dim = 3;
+  unsigned int dof = 3;  
+  bool incCorner = true;  
+
+  PetscTruth compressLut;
+  PetscOptionsHasName(0, "-compressLut", &compressLut);
+
+  if(compressLut) {
+    if(!rank) {
+      std::cout<<"Mesh is Compressed."<<std::endl;
+    }
+  }
+
+  PetscReal imgPatchWidth;
+  PetscTruth patchWidthSetFromOption;
+  PetscOptionsHasName(0, "-imgPatchWidth", &patchWidthSetFromOption);
+  PetscOptionsGetReal(0, "-imgPatchWidth", &imgPatchWidth, 0);
+
+  PetscInt maxDepth = 30;
+  PetscOptionsGetInt(0, "-maxDepth", &maxDepth, 0);
+
+  PetscInt patchWidthFac = 4;
+  PetscOptionsGetInt(0, "-patchWidthFac", &patchWidthFac, 0);
+
+  PetscReal mu = 1.0;
+  PetscOptionsGetReal(0, "-mu", &mu, 0);
+
+  PetscReal lambda = 4.0;
+  PetscOptionsGetReal(0, "-lambda", &lambda, 0);
+
+  PetscReal alpha = 1.0;
+  PetscOptionsGetReal(0, "-alpha", &alpha, 0);
+
+  PetscReal mgLoadFac = 2.0;
+  PetscOptionsGetReal(0, "-mgLoadFac", &mgLoadFac, 0);
+
+  PetscReal threshold = 1.0;
+  PetscOptionsGetReal(0, "-threshold", &threshold, 0);
+  ot::DAMG_Initialize(commAll);
+
+  //Functions for using KSP_Shell (will be used @ the coarsest grid if not all
+  //processors are active on the coarsest grid)
+  ot::getPrivateMatricesForKSP_Shell = getPrivateMatricesForKSP_Shell_Hess;
+
+  //Set function pointers so that PC_BlockDiag could be used.
+  ot::getDofAndNodeSizeForPC_BlockDiag = getDofAndNodeSizeForHessMat;
+  ot::computeInvBlockDiagEntriesForPC_BlockDiag = computeInvBlockDiagEntriesForHessMat;
+
+  double**** LaplacianStencil; 
+  double**** GradDivStencil;
+  double****** PhiMatStencil; 
+
+  PetscInt numGpts = 4;
+  PetscOptionsGetInt(0, "-numGpts", &numGpts, 0);
+
+  double* gWts = new double[numGpts];
+  double* gPts = new double[numGpts];
+
+  if(numGpts == 3) {
+    //3-pt rule
+    gWts[0] = 0.88888889;  gWts[1] = 0.555555556;  gWts[2] = 0.555555556;
+    gPts[0] = 0.0;  gPts[1] = 0.77459667;  gPts[2] = -0.77459667;
+  } else if(numGpts == 4) {
+    //4-pt rule
+    gWts[0] = 0.65214515;  gWts[1] = 0.65214515;
+    gWts[2] = 0.34785485; gWts[3] = 0.34785485;  
+    gPts[0] = 0.33998104;  gPts[1] = -0.33998104;
+    gPts[2] = 0.86113631; gPts[3] = -0.86113631;
+  } else if(numGpts == 5) {
+    //5-pt rule
+    gWts[0] = 0.568888889;  gWts[1] = 0.47862867;  gWts[2] =  0.47862867;
+    gWts[3] = 0.23692689; gWts[4] = 0.23692689;
+    gPts[0] = 0.0;  gPts[1] = 0.53846931; gPts[2] = -0.53846931;
+    gPts[3] = 0.90617985; gPts[4] = -0.90617985;
+  } else if(numGpts == 6) {
+    //6-pt rule
+    gWts[0] = 0.46791393;  gWts[1] = 0.46791393;  gWts[2] = 0.36076157;
+    gWts[3] = 0.36076157; gWts[4] = 0.17132449; gWts[5] = 0.17132449;
+    gPts[0] = 0.23861918; gPts[1] = -0.23861918; gPts[2] = 0.66120939;
+    gPts[3] = -0.66120939; gPts[4] = 0.93246951; gPts[5] = -0.93246951;
+  } else if(numGpts == 7) {
+    //7-pt rule
+    gWts[0] = 0.41795918;  gWts[1] = 0.38183005; gWts[2] = 0.38183005;
+    gWts[3] = 0.27970539;  gWts[4] = 0.27970539; 
+    gWts[5] = 0.12948497; gWts[6] = 0.12948497;
+    gPts[0] = 0.0;  gPts[1] = 0.40584515;  gPts[2] = -0.40584515;
+    gPts[3] = 0.74153119;  gPts[4] = -0.74153119;
+    gPts[5] = 0.94910791; gPts[6] = -0.94910791;
+  } else  {
+    assert(false);
+  }
+
+  createLmat(LaplacianStencil);
+  createGDmat(GradDivStencil);
+  createPhimat(PhiMatStencil, numGpts, gPts);
+
+  int Nfe;
+  std::vector<double> sigImgFinest;
+  std::vector<double> tauImgFinest;
+
+  if(!rank) {
+    struct dsr hdrSig;
+    struct dsr hdrTau;
+
+    readImage(argv[1], &hdrSig, sigImgFinest);
+    readImage(argv[2], &hdrTau, tauImgFinest);
+
+    Nfe = hdrSig.dime.dim[1];
+
+    assert(hdrSig.dime.dim[2] == Nfe);
+    assert(hdrSig.dime.dim[3] == Nfe);
+    assert(hdrTau.dime.dim[1] == Nfe);
+    assert(hdrTau.dime.dim[2] == Nfe);
+    assert(hdrTau.dime.dim[3] == Nfe);
+  }
+  par::Mpi_Bcast<int>(&Nfe, 1, 0, commAll);
+
+  PetscTruth useMultiscale;
+  PetscOptionsHasName(0, "-useMultiscale", &useMultiscale);
+
+  int Nce = 16;
+  if(useMultiscale) {
+    if(!rank) {
+      std::cout<<"Using Multiscale Continuation..."<<std::endl;
+    }
+  } else {
+    Nce = Nfe;
+  }
+
+  PetscInt maxIterCnt = 10;
+  PetscOptionsGetInt(0, "-gnMaxIterCnt", &maxIterCnt, 0);
+
+  PetscReal fTolInit = 0.001;
+  PetscOptionsGetReal(0, "-gnFntol", &fTolInit, 0);
+
+  PetscReal xTolInit = 0.1;
+  PetscOptionsGetReal(0, "-gnXtol", &xTolInit, 0);
+
+  assert(Nfe >= Nce);
+  int numOptLevels = (binOp::fastLog2(Nfe/Nce)) + 1;
+
+  MPI_Comm* commCurr = new MPI_Comm[numOptLevels];
+  assert(commCurr);
+
+  int* npesCurr = new int[numOptLevels];
+  assert(npesCurr);
+
+  //Loop coarsest to finest
+  for(int lev = 0; lev < numOptLevels; lev++) {
+    int Ne = Nce*(1u << lev);
+
+    npesCurr[lev] = npesAll;
+    while(!(foundValidDApart(Ne + 1, npesCurr[lev]))) {
+      npesCurr[lev]--;
+      if(npesCurr[lev] == 0) {
+        break;
+      }
+    }
+
+    if(!rank) {
+      std::cout<<"Multiscale opt lev "<<lev<<" uses "
+        <<npesCurr[lev]<<" processors."<<std::endl;
+    }
+
+    assert(npesCurr[lev]);
+    if(npesCurr[lev] < npesAll) {
+      par::splitCommUsingSplittingRank(npesCurr[lev], (commCurr + lev), commAll);
+    } else {
+      commCurr[lev] = commAll;
+    }
+  }//end for lev
+
+  assert(npesCurr[numOptLevels - 1] == npesAll);
+
+  std::vector<double>* sigElemental = new std::vector<double>[numOptLevels];
+  assert(sigElemental);
+
+  std::vector<double>* tauElemental = new std::vector<double>[numOptLevels];
+  assert(tauElemental);
+
+  std::vector<std::vector<double> >* sigGlobal = new std::vector<std::vector<double> >[numOptLevels];
+  assert(sigGlobal);
+
+  std::vector<std::vector<double> >* gradSigGlobal = new std::vector<std::vector<double> >[numOptLevels];
+  assert(gradSigGlobal);
+
+  std::vector<std::vector<double> >* tauGlobal = new std::vector<std::vector<double> >[numOptLevels];
+  assert(tauGlobal);
+
+  std::vector<std::vector<double> >* gradTauGlobal = new std::vector<std::vector<double> >[numOptLevels];
+  assert(gradTauGlobal);
+
+  DA* da1dof = new DA[numOptLevels];
+  assert(da1dof);
+
+  std::vector<double> sigImgPrev;
+  std::vector<double> tauImgPrev;
+
+  //Loop finest to coarsest
+  for(int lev = (numOptLevels - 1); lev >= 0; lev--) {
+    int Ne = Nce*(1u << lev);
+
+    std::vector<double> sigImgCurr;
+    std::vector<double> tauImgCurr;
+
+    if(!rank) {
+      if(Ne == Nfe) {
+        sigImgCurr = sigImgFinest;
+        sigImgFinest.clear();
+
+        tauImgCurr = tauImgFinest;
+        tauImgFinest.clear();
+      } else {
+        coarsenImage((2*Ne), sigImgPrev, sigImgCurr);
+        coarsenImage((2*Ne), tauImgPrev, tauImgCurr);
+      }
+    }
+
+    sigImgPrev = sigImgCurr;
+    tauImgPrev = tauImgCurr;
+
+    if(rank < npesCurr[lev]) {
+
+      DACreate3d(commCurr[lev], DA_NONPERIODIC, DA_STENCIL_BOX, Ne + 1, Ne + 1, Ne + 1,
+          PETSC_DECIDE, PETSC_DECIDE, PETSC_DECIDE,
+          1, 1, PETSC_NULL, PETSC_NULL, PETSC_NULL, da1dof + lev);
+
+      DA da3dof;
+      DACreate3d(commCurr[lev], DA_NONPERIODIC, DA_STENCIL_BOX, Ne + 1, Ne + 1, Ne + 1,
+          PETSC_DECIDE, PETSC_DECIDE, PETSC_DECIDE,
+          3, 1, PETSC_NULL, PETSC_NULL, PETSC_NULL, &da3dof);
+
+      Vec sigN0;
+      Vec tauN0;
+      createSeqNodalImageVec(Ne, rank, npesCurr[lev], sigImgCurr, sigN0, commCurr[lev]);
+      createSeqNodalImageVec(Ne, rank, npesCurr[lev], tauImgCurr, tauN0, commCurr[lev]);
+
+      sigImgCurr.clear();
+      tauImgCurr.clear();
+
+      Vec sigNatural, tauNatural;
+      createImgN0ToNatural(da1dof[lev], sigN0, tauN0, sigNatural, tauNatural, commCurr[lev]);
+      VecDestroy(sigN0);
+      VecDestroy(tauN0);
+
+      newProcessImgNatural(da1dof[lev], da3dof, Ne, sigNatural, tauNatural,
+          sigGlobal[lev], gradSigGlobal[lev], tauGlobal[lev],
+          gradTauGlobal[lev], sigElemental[lev], tauElemental[lev]);
+
+      DADestroy(da3dof);
+
+      VecDestroy(sigNatural);
+      VecDestroy(tauNatural);
+
+    }//end if active
+
+  }//end for lev
+
+  sigImgPrev.clear();
+  tauImgPrev.clear();
+
+  ot::DAMG *damgPrev = NULL;    
+  std::vector<double> dispOct;
+
+  //Loop coarsest to finest
+  for(int lev = 0; lev < numOptLevels; lev++) {
+    int Ne = Nce*(1u << lev);
+
+    double fTol = fTolInit/(static_cast<double>(Ne));
+    double xTol = xTolInit/(static_cast<double>(Ne));
+
+    if(!patchWidthSetFromOption) {
+      imgPatchWidth = patchWidthFac/static_cast<double>(Ne);
+    }
+
+    if(!rank) {
+      std::cout<<"Starting Lev: "<<lev<<std::endl;
+    }
+
+    ot::DAMG *damg = NULL;    
+
+    PetscInt xs = 0;
+    PetscInt ys = 0;
+    PetscInt zs = 0;
+    PetscInt nx = 0;
+    PetscInt ny = 0;
+    PetscInt nz = 0;
+    int nxe = 0;
+    int nye = 0;
+    int nze = 0;
+
+    if(rank < npesCurr[lev]) {
+      DAGetCorners(da1dof[lev], &xs, &ys, &zs, &nx, &ny, &nz);
+
+      nxe = nx;
+      nye = ny;
+      nze = nz;
+      if((xs + nx) == (Ne + 1)) {
+        nxe = nx - 1;
+      } 
+      if((ys + ny) == (Ne + 1)) {
+        nye = ny - 1;
+      } 
+      if((zs + nz) == (Ne + 1)) {
+        nze = nz - 1;
+      }
+    }//end if active
+
+    PetscLogEventBegin(tauElemAtUEvent, 0, 0, 0, 0);
+
+    std::vector<double> rgNodePts;
+    if(lev) {
+      if(rank < npesCurr[lev]) {
+        for(int zi = zs; zi < (zs + nze); zi++) {
+          for(int yi = ys; yi < (ys + nye); yi++) {
+            for(int xi = xs; xi < (xs + nxe); xi++) {
+              rgNodePts.push_back(static_cast<double>(xi)/static_cast<double>(Ne));
+              rgNodePts.push_back(static_cast<double>(yi)/static_cast<double>(Ne));
+              rgNodePts.push_back(static_cast<double>(zi)/static_cast<double>(Ne));
+            }//end xi
+          }//end yi
+        }//end zi
+      }//end if active
+    }//end if coarsest
+
+    std::vector<double> rgNodeVals;
+    if(lev) {
+      int numLocalPts = (rgNodePts.size())/3;
+      int numGlobalPts;
+      par::Mpi_Allreduce<int>(&numLocalPts, &numGlobalPts, 1, MPI_SUM, commAll);
+
+      int damgPrevNpesActive;
+
+      if(!rank) {
+        assert(damgPrev != NULL);
+        assert((DAMGGetDA(damgPrev)) != NULL);
+        damgPrevNpesActive = (DAMGGetDA(damgPrev))->getNpesActive();
+      }
+
+      par::Mpi_Bcast<int>(&damgPrevNpesActive, 1, 0, commAll);
+
+      int newAvgSize = numGlobalPts/damgPrevNpesActive;
+      int newExtra = numGlobalPts%damgPrevNpesActive;
+
+      std::vector<double> rgNodePtsDup;
+      if( rank >= damgPrevNpesActive) {
+        par::scatterValues<double>(rgNodePts, rgNodePtsDup, 0, commAll);
+      } else if (rank < newExtra) {
+        par::scatterValues<double>(rgNodePts, rgNodePtsDup, (3*(newAvgSize + 1)), commAll);
+      } else {
+        par::scatterValues<double>(rgNodePts, rgNodePtsDup, (3*newAvgSize), commAll);
+      }
+      rgNodePts.clear();
+
+      std::vector<double> rgNodeValsDup;
+      if(damgPrev) {
+        ot::interpolateData(DAMGGetDA(damgPrev), dispOct, rgNodeValsDup, NULL, 3, rgNodePtsDup);
+      }
+      rgNodePtsDup.clear();
+
+      par::scatterValues<double>(rgNodeValsDup, rgNodeVals, (3*numLocalPts), commAll);
+      rgNodeValsDup.clear();
+
+      assert(rgNodeVals.size() == (3*nxe*nye*nze));
+    }//end if coarsest
+
+    //Compute Tau At U using rgNodeVals
+    if(lev) {
+      if(rank < npesCurr[lev]) {
+        //Do Not Free lx, ly, lz. They are managed by DA
+        PetscInt* lx = NULL;
+        PetscInt* ly = NULL;
+        PetscInt* lz = NULL;
+
+        PetscInt npx, npy, npz; 
+
+        DAGetOwnershipRange(da1dof[lev], &lx, &ly, &lz);
+        DAGetInfo(da1dof[lev], PETSC_NULL, PETSC_NULL, PETSC_NULL, PETSC_NULL, &npx, &npy, &npz,	
+            PETSC_NULL, PETSC_NULL, PETSC_NULL, PETSC_NULL);
+
+        assert(lx);
+        assert(ly);
+        assert(lz);
+
+        std::vector<double> scanLx(npx);
+        std::vector<double> scanLy(npy);
+        std::vector<double> scanLz(npz);
+
+        scanLx[0] = 0;
+        scanLy[0] = 0;
+        scanLz[0] = 0;
+        for(int i = 1; i < npx; i++) {
+          scanLx[i] = scanLx[i - 1] + (static_cast<double>(lx[i - 1])/static_cast<double>(Ne));
+        }
+        for(int i = 1; i < npy; i++) {
+          scanLy[i] = scanLy[i - 1] + (static_cast<double>(ly[i - 1])/static_cast<double>(Ne));
+        }
+        for(int i = 1; i < npz; i++) {
+          scanLz[i] = scanLz[i - 1] + (static_cast<double>(lz[i - 1])/static_cast<double>(Ne));
+        }
+
+        int* sendCnts = new int[npesCurr[lev]];
+        assert(sendCnts);
+
+        int* part = new int[(nxe*nye*nze)];
+        assert(part);
+
+        for(int i = 0; i < npesCurr[lev]; i++) {
+          sendCnts[i] = 0;
+        }//end for i
+
+        for(int zi = zs; zi < (zs + nze); zi++) {
+          for(int yi = ys; yi < (ys + nye); yi++) {
+            for(int xi = xs; xi < (xs + nxe); xi++) {
+              int idx = ((((zi - zs)*nye) + (yi - ys))*nxe) + (xi - xs);
+              double xPt = (static_cast<double>(xi)/static_cast<double>(Ne)) + rgNodeVals[3*idx];
+              double yPt = (static_cast<double>(yi)/static_cast<double>(Ne)) + rgNodeVals[(3*idx) + 1];
+              double zPt = (static_cast<double>(zi)/static_cast<double>(Ne)) + rgNodeVals[(3*idx) + 2];
+              if( (xPt < 0.0) || (yPt < 0.0) || (zPt < 0.0) ||
+                  (xPt >= 1.0) || (yPt >= 1.0) || (zPt >= 1.0) ) {
+                part[idx] = rank;
+              } else {
+                unsigned int xRes, yRes, zRes;
+                seq::maxLowerBound<double>(scanLx, xPt, xRes, 0, 0);
+                seq::maxLowerBound<double>(scanLy, yPt, yRes, 0, 0);
+                seq::maxLowerBound<double>(scanLz, zPt, zRes, 0, 0);
+                part[idx] = (((zRes*npy) + yRes)*npx) + xRes;
+              }
+              assert(part[idx] < npesCurr[lev]);
+              sendCnts[part[idx]] += 3;
+            }//end for xi
+          }//end for yi
+        }//end for zi
+
+        scanLx.clear();
+        scanLy.clear();
+        scanLz.clear();  
+
+        int* recvCnts = new int[npesCurr[lev]];
+        assert(recvCnts);
+
+        par::Mpi_Alltoall<int>(sendCnts, recvCnts, 1, commCurr[lev]);
+
+        int* sendOffsets = new int[npesCurr[lev]];
+        assert(sendOffsets);
+
+        int* recvOffsets = new int[npesCurr[lev]];
+        assert(recvOffsets);
+
+        sendOffsets[0] = 0;
+        recvOffsets[0] = 0;
+        for(int i = 1; i < npesCurr[lev]; i++) {
+          sendOffsets[i] = sendOffsets[i - 1] + sendCnts[i - 1];
+          recvOffsets[i] = recvOffsets[i - 1] + recvCnts[i - 1];
+        }//end for i
+
+        int* tmpSendCnts = new int[npesCurr[lev]];  
+        assert(tmpSendCnts);
+        for(int i = 0; i < npesCurr[lev]; i++) {
+          tmpSendCnts[i] = 0;
+        }//end for i
+
+        int totalSend = (3*nxe*nye*nze);
+        double* xyzSendVals = new double[totalSend];
+        assert(xyzSendVals);
+
+        for(int zi = zs; zi < (zs + nze); zi++) {
+          for(int yi = ys; yi < (ys + nye); yi++) {
+            for(int xi = xs; xi < (xs + nxe); xi++) {
+              int idx = ((((zi - zs)*nye) + (yi - ys))*nxe) + (xi - xs);
+              double xPt = (static_cast<double>(xi)/static_cast<double>(Ne)) + rgNodeVals[3*idx];
+              double yPt = (static_cast<double>(yi)/static_cast<double>(Ne)) + rgNodeVals[(3*idx) + 1];
+              double zPt = (static_cast<double>(zi)/static_cast<double>(Ne)) + rgNodeVals[(3*idx) + 2];
+
+              int sendId = sendOffsets[part[idx]] + tmpSendCnts[part[idx]];
+
+              xyzSendVals[sendId] = xPt;
+              xyzSendVals[sendId + 1] = yPt;
+              xyzSendVals[sendId + 2] = zPt;
+
+              tmpSendCnts[part[idx]] += 3;
+            }//end for xi
+          }//end for yi
+        }//end for zi
+
+        int totalRecv = recvOffsets[npesCurr[lev] - 1] + recvCnts[npesCurr[lev] - 1];
+        double* xyzRecvVals = new double[totalRecv];
+        assert(xyzRecvVals);
+
+        par::Mpi_Alltoallv_sparse<double>(xyzSendVals, sendCnts, sendOffsets,
+            xyzRecvVals, recvCnts, recvOffsets, commCurr[lev]);
+
+        DA da3dof;
+        DACreate3d(commCurr[lev], DA_NONPERIODIC, DA_STENCIL_BOX, Ne + 1, Ne + 1, Ne + 1,
+            PETSC_DECIDE, PETSC_DECIDE, PETSC_DECIDE,
+            3, 1, PETSC_NULL, PETSC_NULL, PETSC_NULL, &da3dof);
+
+        Vec tauVec;
+        Vec gradTauVec;
+
+        DACreateGlobalVector(da1dof[lev], &tauVec);
+        DACreateGlobalVector(da3dof, &gradTauVec);
+
+        PetscScalar* tauArr;
+        PetscScalar* gradTauArr;
+
+        VecGetArray(tauVec, &tauArr);
+        VecGetArray(gradTauVec, &gradTauArr);
+
+        for(int i = 0; i < (nx*ny*nz); i++) {
+          tauArr[i] = tauGlobal[lev][0][i];
+          for(int j = 0; j < 3; j++) {
+            gradTauArr[(3*i) + j] = gradTauGlobal[lev][0][(3*i) + j];
+          }//end for j
+        }//end for i
+
+        VecRestoreArray(tauVec, &tauArr);
+        VecRestoreArray(gradTauVec, &gradTauArr);
+
+        Vec tauGhosted;
+        Vec gradTauGhosted;
+
+        DACreateLocalVector(da1dof[lev], &tauGhosted);
+        DACreateLocalVector(da3dof, &gradTauGhosted);
+
+        DAGlobalToLocalBegin(da1dof[lev], tauVec, INSERT_VALUES, tauGhosted);
+        DAGlobalToLocalEnd(da1dof[lev], tauVec, INSERT_VALUES, tauGhosted);
+
+        DAGlobalToLocalBegin(da3dof, gradTauVec, INSERT_VALUES, gradTauGhosted);
+        DAGlobalToLocalEnd(da3dof, gradTauVec, INSERT_VALUES, gradTauGhosted);
+
+        PetscScalar*** tauGhostedArr;
+        PetscScalar**** gradTauGhostedArr;
+
+        DAVecGetArray(da1dof[lev], tauGhosted, &tauGhostedArr);
+        DAVecGetArrayDOF(da3dof, gradTauGhosted, &gradTauGhostedArr);
+
+        double* sendTauVals = new double[totalRecv/3];
+        assert(sendTauVals);
+
+        for(unsigned int i = 0; i < totalRecv; i += 3) {
+          double xPt = xyzRecvVals[i];
+          double yPt = xyzRecvVals[i + 1];
+          double zPt = xyzRecvVals[i + 2];
+
+          //interpolate tau 
+          double tauAtUval = 0;
+
+          if( (xPt >= 0.0) && (yPt >= 0.0) && (zPt >= 0.0) 
+              && (xPt < 1.0) && (yPt < 1.0) && (zPt < 1.0) ) {
+            unsigned int ei = static_cast<int>(xPt*static_cast<double>(Ne));
+            unsigned int ej = static_cast<int>(yPt*static_cast<double>(Ne));
+            unsigned int ek = static_cast<int>(zPt*static_cast<double>(Ne));
+
+            double x0 = static_cast<double>(ei)/static_cast<double>(Ne);
+            double y0 = static_cast<double>(ej)/static_cast<double>(Ne);
+            double z0 = static_cast<double>(ek)/static_cast<double>(Ne);
+
+            double psi = ((xPt - x0)*2.0*static_cast<double>(Ne)) - 1.0;
+            double eta = ((yPt - y0)*2.0*static_cast<double>(Ne)) - 1.0;
+            double gamma = ((zPt - z0)*2.0*static_cast<double>(Ne)) - 1.0;
+            double phiVals[8][4];
+
+            evalAll3Dcubic(psi, eta, gamma, phiVals);
+
+            for(int j = 0; j < 8; j++) {
+              int xid = ei + (j%2);
+              int yid = ej + ((j/2)%2);
+              int zid = ek + (j/4);
+              tauAtUval += ((tauGhostedArr[zid][yid][xid])*(phiVals[j][0]));
+              for(int k = 0; k < 3; k++) {
+                tauAtUval += ((0.5/static_cast<double>(Ne))*
+                    (gradTauGhostedArr[zid][yid][xid][k])*(phiVals[j][1 + k]));
+              }//end for k
+            }//end for j
+
+          }//end if in domain
+
+          sendTauVals[i/3] = tauAtUval;
+        }//end for i
+
+        DAVecRestoreArray(da1dof[lev], tauGhosted, &tauGhostedArr);
+        DAVecRestoreArrayDOF(da3dof, gradTauGhosted, &gradTauGhostedArr);
+
+        VecDestroy(tauVec);
+        VecDestroy(gradTauVec);
+        VecDestroy(tauGhosted);
+        VecDestroy(gradTauGhosted);
+
+        DADestroy(da3dof);
+
+        double* recvTauVals = new double[totalSend/3];
+        assert(recvTauVals);
+
+        for(int i = 0; i < npesCurr[lev]; i++) {
+          sendCnts[i] = sendCnts[i]/3;
+          sendOffsets[i] = sendOffsets[i]/3;
+          recvCnts[i] = recvCnts[i]/3;
+          recvOffsets[i] = recvOffsets[i]/3;
+        }//end for i
+
+        par::Mpi_Alltoallv_sparse<double>(sendTauVals, recvCnts, recvOffsets, 
+            recvTauVals, sendCnts, sendOffsets, commCurr[lev]);
+
+        for(int i = 0; i < npesCurr[lev]; i++) {
+          tmpSendCnts[i] = 0;
+        }//end for i
+
+        for(int zi = zs; zi < (zs + nze); zi++) {
+          for(int yi = ys; yi < (ys + nye); yi++) {
+            for(int xi = xs; xi < (xs + nxe); xi++) {
+              int idx = ((((zi - zs)*nye) + (yi - ys))*nxe) + (xi - xs);
+              int sendId = sendOffsets[part[idx]] + tmpSendCnts[part[idx]];
+              tauElemental[lev][idx] = recvTauVals[sendId];
+              tmpSendCnts[part[idx]]++;
+            }//end for xi
+          }//end for yi
+        }//end for zi
+
+        assert(sendTauVals);
+        delete [] sendTauVals;
+        sendTauVals = NULL;
+
+        assert(recvTauVals);
+        delete [] recvTauVals;
+        recvTauVals = NULL;
+
+        assert(xyzSendVals);
+        delete [] xyzSendVals;
+        xyzSendVals = NULL;
+
+        assert(xyzRecvVals);
+        delete [] xyzRecvVals;
+        xyzRecvVals = NULL;
+
+        assert(sendOffsets);
+        delete [] sendOffsets;
+        sendOffsets = NULL;
+
+        assert(recvOffsets);
+        delete [] recvOffsets;
+        recvOffsets = NULL;
+
+        assert(tmpSendCnts);
+        delete [] tmpSendCnts;
+        tmpSendCnts = NULL;
+
+        assert(sendCnts);
+        delete [] sendCnts;
+        sendCnts = NULL;
+
+        assert(recvCnts);
+        delete [] recvCnts;
+        recvCnts = NULL;
+
+        assert(part);
+        delete [] part;
+        part = NULL;
+
+      }//end if active
+    }//end if coarsest
+
+    rgNodeVals.clear();
+
+    PetscLogEventEnd(tauElemAtUEvent, 0, 0, 0, 0);
+
+    if(rank < npesCurr[lev]) {
+      //Image to octree
+      std::vector<ot::TreeNode> linSigOct;
+      std::vector<ot::TreeNode> linTauOct;
+      std::vector<ot::TreeNode> linOct;
+      ot::regularGrid2Octree(sigElemental[lev], Ne, nxe, nye, nze, xs, ys, zs,
+          linSigOct, dim, maxDepth, threshold, commCurr[lev]);
+      ot::regularGrid2Octree(tauElemental[lev], Ne, nxe, nye, nze, xs, ys, zs,
+          linTauOct, dim, maxDepth, threshold, commCurr[lev]);
+
+      sigElemental[lev].clear();
+      tauElemental[lev].clear();
+
+      unsigned int locSigSz = linSigOct.size();
+      unsigned int locTauSz = linTauOct.size();
+      unsigned int globSigSz;
+      unsigned int globTauSz;
+      par::Mpi_Allreduce<unsigned int>(&locSigSz, &globSigSz, 1, MPI_SUM, commCurr[lev]);
+      par::Mpi_Allreduce<unsigned int>(&locTauSz, &globTauSz, 1, MPI_SUM, commCurr[lev]);
+
+      if(!rank) {
+        std::cout<<"Lev: "<<lev<<" globSigSz: "<<globSigSz<<" globTauSz: "<<globTauSz<<std::endl;
+      }
+
+      if(globTauSz > globSigSz) {
+        MPI_Comm tmpComm;
+        par::splitComm2way(linTauOct.empty(), &tmpComm, commCurr[lev]);
+        if(!(linTauOct.empty())) {
+          int tmpNpes, tmpRank;
+          MPI_Comm_size(tmpComm, &tmpNpes);
+          MPI_Comm_rank(tmpComm, &tmpRank);
+          unsigned int avgSz = globSigSz/tmpNpes;
+          unsigned int extra = globSigSz%tmpNpes;
+          std::vector<ot::TreeNode> tmpLinOct;
+          if(tmpRank < extra) {
+            par::scatterValues<ot::TreeNode>(linSigOct, tmpLinOct, (avgSz + 1), commCurr[lev]);
+          } else {
+            par::scatterValues<ot::TreeNode>(linSigOct, tmpLinOct, avgSz, commCurr[lev]);
+          }
+          ot::mergeOctrees(linTauOct, tmpLinOct, linOct, tmpComm);
+        } else {
+          std::vector<ot::TreeNode> tmpLinOct;
+          par::scatterValues<ot::TreeNode>(linSigOct, tmpLinOct, 0, commCurr[lev]);
+        }
+      } else {
+        MPI_Comm tmpComm;
+        par::splitComm2way(linSigOct.empty(), &tmpComm, commCurr[lev]);
+        if(!(linSigOct.empty())) {
+          int tmpNpes, tmpRank;
+          MPI_Comm_size(tmpComm, &tmpNpes);
+          MPI_Comm_rank(tmpComm, &tmpRank);
+          unsigned int avgSz = globTauSz/tmpNpes;
+          unsigned int extra = globTauSz%tmpNpes;
+          std::vector<ot::TreeNode> tmpLinOct;
+          if(tmpRank < extra) {
+            par::scatterValues<ot::TreeNode>(linTauOct, tmpLinOct, (avgSz + 1), commCurr[lev]);
+          } else {
+            par::scatterValues<ot::TreeNode>(linTauOct, tmpLinOct, avgSz, commCurr[lev]);
+          }
+          ot::mergeOctrees(linSigOct, tmpLinOct, linOct, tmpComm);
+        } else {
+          std::vector<ot::TreeNode> tmpLinOct;
+          par::scatterValues<ot::TreeNode>(linTauOct, tmpLinOct, 0, commCurr[lev]);
+        }
+      }
+      linSigOct.clear();
+      linTauOct.clear();
+
+      std::vector<ot::TreeNode> balOct;
+      ot::balanceOctree(linOct, balOct, dim, maxDepth, incCorner, commCurr[lev]);
+      linOct.clear();
+
+      int nlevels = 1; 
+      PetscInt nlevelsPetscInt = nlevels;
+      PetscOptionsGetInt(0, "-nlevels", &nlevelsPetscInt, 0);
+      nlevels = nlevelsPetscInt;
+
+      bool balOctEmpty = balOct.empty();
+
+      MPI_Comm balOctComm;
+      par::splitComm2way(balOctEmpty, &balOctComm, commCurr[lev]);
+
+      if(!balOctEmpty) {
+        int balOctNpes;
+        MPI_Comm_size(balOctComm, &balOctNpes);
+        assert(rank < balOctNpes);
+        ot::DAMGCreateAndSetDA(balOctComm, nlevels, NULL, &damg, 
+            balOct, dof, mgLoadFac, compressLut, incCorner);
+      }
+      balOct.clear();
+
+      std::vector<ot::TreeNode> imgPatches;
+      std::vector<unsigned int> mesh;
+
+      if(damg) {
+        ot::PrintDAMG(damg);
+        ot::DAMGCreateSuppressedDOFs(damg);
+        createImagePatches(Ne, DAMGGetDA(damg), imgPatches);
+        expandImagePatches(Ne, imgPatchWidth, ((DAMGGetDA(damg))->getBlocks()), imgPatches);
+        meshImagePatches(imgPatches, mesh);
+      }
+
+      std::vector<std::vector<double> > sigLocal;
+      std::vector<std::vector<double> > gradSigLocal;
+      std::vector<std::vector<double> > tauLocal;
+      std::vector<std::vector<double> > gradTauLocal;
+
+      copyValuesToImagePatches(da1dof[lev], imgPatches, sigGlobal[lev], gradSigGlobal[lev],
+          tauGlobal[lev], gradTauGlobal[lev], sigLocal,
+          gradSigLocal, tauLocal, gradTauLocal);
+
+      DADestroy(da1dof[lev]);
+
+      sigGlobal[lev].clear();
+      gradSigGlobal[lev].clear();
+      tauGlobal[lev].clear();
+      gradTauGlobal[lev].clear();
+
+      if(damg) {
+        createNewHessContexts(damg, imgPatchWidth, imgPatches, mesh,
+            sigLocal, gradSigLocal, tauLocal, gradTauLocal,
+            PhiMatStencil, LaplacianStencil, GradDivStencil,
+            numGpts, gWts, gPts, mu, lambda, alpha);
+      }
+
+      sigLocal.clear();
+      gradSigLocal.clear();
+      tauLocal.clear();
+      gradTauLocal.clear();
+
+      imgPatches.clear();
+      mesh.clear();
+    }//end if active
+
+    ot::DA* dao = NULL;
+    std::vector<double> nodePts;
+    if(damg) {
+      dao = DAMGGetDA(damg);
+      if(lev) {
+        double hFac = 1.0/static_cast<double>(1u << maxDepth);
+        if(dao->iAmActive()) {
+          for(dao->init<ot::DA_FLAGS::WRITABLE>();
+              dao->curr() < dao->end<ot::DA_FLAGS::WRITABLE>();
+              dao->next<ot::DA_FLAGS::WRITABLE>()) {
+            Point pt = dao->getCurrentOffset();
+            unsigned int xint = pt.xint();
+            unsigned int yint = pt.yint();
+            unsigned int zint = pt.zint();
+            double x0 = hFac*static_cast<double>(xint);
+            double y0 = hFac*static_cast<double>(yint);
+            double z0 = hFac*static_cast<double>(zint);
+            unsigned int idx = dao->curr();
+            unsigned char hnMask = dao->getHangingNodeIndex(idx);
+            if(!(hnMask & 1)) {
+              nodePts.push_back(x0);
+              nodePts.push_back(y0);
+              nodePts.push_back(z0);
+            }//end if hanging anchor
+          }//end WRITABLE
+        }//end if active
+      }//end if coarsest
+    }//end if active 
+
+    std::vector<double> nodeVals;
+    if(lev) {
+      int numLocalPts = nodePts.size()/3;
+      int numGlobalPts;
+      par::Mpi_Allreduce<int>(&numLocalPts, &numGlobalPts, 1, MPI_SUM, commAll);
+
+      int damgPrevNpesActive;
+
+      if(!rank) {
+        assert(damgPrev != NULL);
+        assert((DAMGGetDA(damgPrev)) != NULL);
+        damgPrevNpesActive = (DAMGGetDA(damgPrev))->getNpesActive();
+      }
+
+      par::Mpi_Bcast<int>(&damgPrevNpesActive, 1, 0, commAll);
+
+      int newAvgSize = numGlobalPts/damgPrevNpesActive;
+      int newExtra = numGlobalPts%damgPrevNpesActive;
+
+      std::vector<double> nodePtsDup;
+      if( rank >= damgPrevNpesActive) {
+        par::scatterValues<double>(nodePts, nodePtsDup, 0, commAll);
+      } else if (rank < newExtra) {
+        par::scatterValues<double>(nodePts, nodePtsDup, (3*(newAvgSize + 1)), commAll);
+      } else {
+        par::scatterValues<double>(nodePts, nodePtsDup, (3*newAvgSize), commAll);
+      }
+      nodePts.clear();
+
+      std::vector<double> nodeValsDup;
+      if(damgPrev) {
+        ot::interpolateData(DAMGGetDA(damgPrev), dispOct, nodeValsDup, NULL, 3, nodePtsDup);
+      }
+      nodePtsDup.clear();
+
+      par::scatterValues<double>(nodeValsDup, nodeVals, (3*numLocalPts), commAll);
+      nodeValsDup.clear();
+    }//end if coarsest
+
+    dispOct.clear();
+    if(damgPrev) {
+      ot::DAMGDestroy(damgPrev);
+      damgPrev = NULL;
+    }
+    damgPrev = damg;
+
+    if(damg) {
+      Vec Uin;
+      dao->createVector(Uin, false, false, 3);
+      VecZeroEntries(Uin);
+
+      if(lev) {
+        int ptsCtr = 0;
+        if(dao->iAmActive()) {
+          PetscScalar* inArr;
+          dao->vecGetBuffer(Uin, inArr, false, false, false, 3);
+
+          for(dao->init<ot::DA_FLAGS::WRITABLE>();
+              dao->curr() < dao->end<ot::DA_FLAGS::WRITABLE>();
+              dao->next<ot::DA_FLAGS::WRITABLE>()) {
+            unsigned int idx = dao->curr();
+            unsigned char hnMask = dao->getHangingNodeIndex(idx);
+            if(!(hnMask & 1)) {
+              for(int d = 0; d < 3; d++) {
+                inArr[(3*idx) + d] = nodeVals[(3*ptsCtr) + d];
+              }
+              ptsCtr++;
+            }//end if hanging anchor
+          }//end WRITABLE
+
+          dao->vecRestoreBuffer(Uin, inArr, false, false, false, 3);
+        }//end if active
+      }//end if coarsest
+      nodeVals.clear();
+
+      Vec Uout;
+      VecDuplicate(Uin, &Uout);
+
+      if(!rank) {
+        std::cout<<"Starting GaussNewton..."<<std::endl;
+      }
+
+      newGaussNewton(damg, fTol, xTol, maxIterCnt, imgPatchWidth, Uin, Uout);
+
+      destroyHessContexts(damg);
+
+      VecDestroy(Uin);
+
+      PetscScalar* octDispVals;
+      VecGetArray(Uout, &octDispVals);
+
+      PetscInt dispOctSz;
+      VecGetLocalSize(Uout, &dispOctSz);
+
+      dispOct.resize(dispOctSz);
+      for(int i = 0; i < dispOctSz; i++) {
+        dispOct[i] = octDispVals[i];
+      }//end for i
+
+      VecRestoreArray(Uout, &octDispVals);
+
+      VecDestroy(Uout);
+    }//end if active
+
+  }//end for lev
+
+  assert(commCurr);
+  delete [] commCurr;
+  commCurr = NULL;
+
+  assert(npesCurr);
+  delete [] npesCurr;
+  npesCurr = NULL;
+
+  assert(sigElemental);
+  delete [] sigElemental;
+  sigElemental = NULL;
+
+  assert(tauElemental);
+  delete [] tauElemental;
+  tauElemental = NULL;
+
+  assert(sigGlobal);
+  delete [] sigGlobal;
+  sigGlobal = NULL;
+
+  assert(tauGlobal);
+  delete [] tauGlobal;
+  tauGlobal = NULL;
+
+  assert(gradSigGlobal);
+  delete [] gradSigGlobal;
+  gradSigGlobal = NULL;
+
+  assert(gradTauGlobal);
+  delete [] gradTauGlobal;
+  gradTauGlobal = NULL;
+
+  assert(da1dof);
+  delete [] da1dof;
+  da1dof = NULL;
+
+  destroyLmat(LaplacianStencil);
+  destroyGDmat(GradDivStencil);
+  destroyPhimat(PhiMatStencil, numGpts);
+
+  assert(gPts);
+  delete [] gPts;
+  gPts = NULL;
+
+  assert(gWts);
+  delete [] gWts;
+  gWts = NULL;
+
+  DA dar;
+  Vec UrgGlobal;
+
+  if(damgPrev) {
+    DACreate3d(damgPrev[0]->comm, DA_NONPERIODIC, DA_STENCIL_BOX, Nfe + 1, Nfe + 1, Nfe + 1,
+        PETSC_DECIDE, PETSC_DECIDE, PETSC_DECIDE,
+        3, 1, PETSC_NULL, PETSC_NULL, PETSC_NULL, &dar);
+
+    mortonToRgGlobalDisp(damgPrev, dar, Nfe, dispOct, UrgGlobal);
+  }//end if active
+
+  dispOct.clear();
+
+  PetscTruth saveFinalRgDisp;
+  PetscOptionsHasName(0, "-saveFinalRgDisp", &saveFinalRgDisp);
+
+  if(damgPrev) {
+
+    if(saveFinalRgDisp) {
+      Vec UrgNatural;
+      DACreateNaturalVector(dar, &UrgNatural);
+
+      DAGlobalToNaturalBegin(dar, UrgGlobal, INSERT_VALUES, UrgNatural);
+      DAGlobalToNaturalEnd(dar, UrgGlobal, INSERT_VALUES, UrgNatural);
+
+      char fname[256];
+      sprintf(fname, "%s_%d_%d.dat", argv[3], rank, npesAll);
+      saveVector(UrgNatural, fname);
+
+      VecDestroy(UrgNatural);
+    }
+
+    double maxDetJac, minDetJac;
+    detJacMaxAndMin(dar, UrgGlobal, &maxDetJac, &minDetJac);
+    if(!rank) {
+      std::cout<<" Max Det Jac: "<<maxDetJac<<" Min Det Jac: "<<minDetJac<<std::endl;
+    }
+
+    VecDestroy(UrgGlobal);
+
+    DADestroy(dar);
+
+    ot::DAMGDestroy(damgPrev);
+    damgPrev = NULL;
+
+  }//end if active
+
+
+  ot::DAMG_Finalize();
+
+  PetscFinalize();
+
+}
+
+
+
