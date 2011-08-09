@@ -7,7 +7,7 @@
 #include "externVars.h"
 #include "dendro.h"
 
-#define __PI__ 3.14159265
+#define __PI__ 3.1415926535897932
 
 //Don't want time to be synchronized. Need to check load imbalance.
 #ifdef MPI_WTIME_IS_GLOBAL
