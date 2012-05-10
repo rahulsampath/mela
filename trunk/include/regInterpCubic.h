@@ -3,8 +3,8 @@
 #define _REG_INTERP_CUBIC_H_
 
 #include "mpi.h"
-#include "TreeNode.h"
-#include "oda.h"
+#include "oct/TreeNode.h"
+#include "oda/oda.h"
 #include <vector>
 
 void computeNodalGradTauAtU(ot::DA* dao, const std::vector<std::vector<double> > & tauLocal,

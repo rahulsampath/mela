@@ -9,8 +9,8 @@
 #define _REGISTRATION_H_
 
 #include "mpi.h"
-#include "oda.h"
-#include "omg.h"
+#include "oda/oda.h"
+#include "omg/omg.h"
 #include "petscda.h"
 #include <vector>
 #include "dbh.h"

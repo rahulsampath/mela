@@ -6,12 +6,12 @@
   */
 
 #include "mpi.h"
-#include "oda.h"
-#include "omg.h"
+#include "oda/oda.h"
+#include "omg/omg.h"
 #include "petscda.h"
 #include <vector>
-#include "parUtils.h"
-#include "seqUtils.h"
+#include "par/parUtils.h"
+#include "seq/seqUtils.h"
 #include <cmath>
 #include <cassert>
 #include <cstring>

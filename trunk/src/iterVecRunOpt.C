@@ -3,6 +3,7 @@
 #include "regInterpCubic.h"
 #include "registration.h"
 #include <cmath>
+#include <cstring>
 #include "dendro.h"
 #include <iostream>
 #include "elasReg.h"
