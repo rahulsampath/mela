@@ -1,6 +1,7 @@
+
 #include "mpi.h"
-#include "sys.h"
-#include "omg.h"
+#include "sys/sys.h"
+#include "omg/omg.h"
 #include "registration.h"
 #include "regInterpCubic.h"
 #include "externVars.h"

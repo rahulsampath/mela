@@ -6,9 +6,9 @@
   */
 
 #include "mpi.h"
-#include "TreeNode.h"
+#include "oct/TreeNode.h"
 #include <vector>
-#include "seqUtils.h"
+#include "seq/seqUtils.h"
 #include "regInterpCubic.h"
 
 extern int computeSigEvent;
